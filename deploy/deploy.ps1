@@ -33,7 +33,7 @@ param(
     [Parameter(HelpMessage = 'The URL to the git repository to deploy.')]
     [AllowEmptyString()]
     [string]
-    $GitRepoUrl = 'https://github.com/OfficeDev/microsoft-teams-apps-callrecord-insights.git',
+    $GitRepoUrl = 'https://github.com/moeltoha/microsoft-teams-apps-callrecord-insights.git',
 
     [Parameter(HelpMessage = 'The branch of the git repository to deploy.')]
     [AllowEmptyString()]
