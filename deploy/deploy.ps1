@@ -23,17 +23,18 @@ param(
     $DeploymentSize = 'Production',
 
     [Parameter(HelpMessage = 'The Azure region that''s right for you. Not every resource is available in every region.')]
-    [ValidateSet('australiacentral', 'australiaeast', 'australiasoutheast', 'brazilsouth', 'canadacentral', 'canadaeast', 'centralindia', 'centralus', 'eastasia',
-        'eastus', 'eastus2', 'francecentral', 'germanywestcentral', 'japaneast', 'japanwest', 'koreacentral', 'koreasouth', 'northcentralus', 'northeurope', 'norwayeast',
-        'polandcentral', 'qatarcentral', 'southafricanorth', 'southcentralus', 'southeastasia', 'southindia', 'swedencentral', 'switzerlandnorth', 'uaenorth', 'uksouth',
-        'ukwest', 'westcentralus', 'westeurope', 'westindia', 'westus', 'westus2', 'westus3')]
+    [ValidateSet('australiaeast', 'brazilsouth', 'canadacentral', 'centralindia', 'centralus', 'eastasia', 'eastus', 'eastus2',
+        'francecentral', 'germanywestcentral', 'japaneast', 'koreacentral', 'northcentralus', 'northeurope', 'norwayeast',
+        'polandcentral', 'southafricanorth', 'southcentralus', 'southeastasia', 'swedencentral', 'switzerlandnorth',
+        'uaenorth', 'uksouth', 'westcentralus', 'westeurope', 'westus', 'westus2', 'westus3',
+        'usgovvirginia', 'usgovarizona', 'usgovtexas', 'usdodcentral')]
     [string]
     $Location = 'westus',
 
     [Parameter(HelpMessage = 'The URL to the git repository to deploy.')]
     [AllowEmptyString()]
     [string]
-    $GitRepoUrl = 'https://github.com/moeltoha/microsoft-teams-apps-callrecord-insights.git',
+    $GitRepoUrl = 'https://github.com/OfficeDev/microsoft-teams-apps-callrecord-insights.git',
 
     [Parameter(HelpMessage = 'The branch of the git repository to deploy.')]
     [AllowEmptyString()]
@@ -82,6 +83,18 @@ if (!(Get-Command -Name az -CommandType Application -ErrorAction SilentlyContinu
     return
 }
 
+$GraphEndpoint = switch ($Location) {
+    { $_ -in @('usgovvirginia', 'usgovarizona', 'usgovtexas', 'usgoviowa') } { 'graph.microsoft.us' }
+    { $_ -in @('usdodcentral','usdodeast') } { 'dod-graph.microsoft.us' }
+    default { 'graph.microsoft.com' }
+}
+
+$AzureCloud = switch ($GraphEndpoint) {
+    { $_ -in @('usgovvirginia', 'usgovarizona', 'usgovtexas', 'usgoviowa') } { 'AzureUSGovernment' }
+    { $_ -in @('usdodcentral','usdodeast') } { 'AzureUSGovernment' }
+    default { 'AzureCloud' }
+}
+
 $AzCommands = @{
     getdeployment             = { az deployment group show --resource-group $args[0] --name $args[1] --query properties 2>&1 }
     deploybicep               = {
@@ -120,15 +133,18 @@ $AzCommands = @{
         az @parameters 2>&1
     }  
     getdeploymentoperations   = { az deployment operation group list --resource-group $args[0] --name $args[1] --query "[].{provisioningState:properties.provisioningState,targetResource:properties.targetResource.id,statusMessage:properties.statusMessage.error.message}" 2>&1 }
+    getenvironment            = { az cloud show --query name 2>&1 }
+    setenvironment            = { az cloud set --name $args[0] 2>&1 }
     getazsubscription         = { az account show --query id 2>&1 }
     connect                   = { az login 2>&1; if ($LASTEXITCODE -eq 0) { az account set --subscription $args[0] 2>&1 } }
     getazusername             = { az ad signed-in-user show --query userPrincipalName 2>&1 }
     getazoid                  = { az ad signed-in-user show --query id 2>&1 }
     getaztenant               = { az account show --query tenantId 2>&1 }
     getspnobjectid            = { az ad sp list --spn $args[0] --query "[].id" 2>&1 }
+    createspn                 = { az ad sp create --id $args[0] --query "[].id" 2>&1 }
     getresourcegroup          = { az group show --name $args[0] 2>&1 }
     createresourcegroup       = { az group create --name $args[0] --location $args[1] 2>&1 }
-    getaadapproleassignments  = { az rest --method get --url "https://graph.microsoft.com/v1.0/servicePrincipals/$($args[0])/appRoleAssignments" 2>&1 }
+    getaadapproleassignments  = { az rest --method get --url "https://${GraphEndpoint}/v1.0/servicePrincipals/$($args[0])/appRoleAssignments" 2>&1 }
     addaadapproleassignment   = {
         $request = @{
             principalId = $args[0]
@@ -136,7 +152,7 @@ $AzCommands = @{
             appRoleId   = $args[2]
         }
         $body = ($request | ConvertTo-Json -Compress).Replace('"', '\"')
-        az rest --method post --url "https://graph.microsoft.com/v1.0/servicePrincipals/$($args[0])/appRoleAssignments" --body "$body" 2>&1
+        az rest --method post --url "https://${GraphEndpoint}/v1.0/servicePrincipals/$($args[0])/appRoleAssignments" --body "$body" 2>&1
     }
     getwebappdeployment       = { az webapp log deployment show --resource-group $args[0] --name $args[1] 2>&1 }
     getmasterkey              = { az functionapp keys list --resource-group $args[0] --name $args[1] --query masterKey 2>&1 }
@@ -329,6 +345,22 @@ Write-Host "Ensuring we are connected to subscription '$SubscriptionId'."
 $Errors, $ConnectedSubscriptionId = TryExecuteMethod getazsubscription
 
 if ($Errors -or $null -eq $ConnectedSubscriptionId -or $ConnectedSubscriptionId -ne $SubscriptionId) {
+    $Errors, $CurrentAzureCloud = TryExecuteMethod getenvironment $AzureCloud
+    if ($Errors) {
+        Write-Error "Failed to get the current environment. Please ensure you have access to the subscription and try again."
+        $Errors | ForEach-Object { Write-Error -ErrorRecord $_ }
+        return
+    }
+    if ($CurrentAzureCloud -ne $AzureCloud) {
+        Write-Host "Setting the environment to '$AzureCloud'."
+        $Errors, $null = TryExecuteMethod setenvironment $AzureCloud
+        if ($Errors) {
+            Write-Error "Failed to set the environment to '$AzureCloud'. Please ensure you have access to the subscription and try again."
+            $Errors | ForEach-Object { Write-Error -ErrorRecord $_ }
+            return
+        }
+    }
+
     Write-Host "Connecting to subscription '$SubscriptionId'. Please login if prompted."
     $Errors, $null = TryExecuteMethod connect $SubscriptionId
     if ($Errors) {
@@ -379,6 +411,15 @@ if ($Errors) {
     Write-Error "Failed to get the SPN object id for the Microsoft Graph Change Tracking app. Please ensure you have access to the tenant and try again."
     $Errors | ForEach-Object { Write-Error -ErrorRecord $_ }
     return
+}
+if ($null -eq $GraphChangeTrackingSPNObjectId) { 
+    Write-Host "Creating SPN for the Microsoft Graph Change Tracking app."
+    $Errors, $GraphChangeTrackingSPNObjectId = TryExecuteMethod createspn '0bf30f3b-4a52-48df-9a82-234910c4a086'
+    if ($Errors) {
+        Write-Error "Failed to create the SPN object id for the Microsoft Graph Change Tracking app. Please ensure you have access to the tenant and try again."
+        $Errors | ForEach-Object { Write-Error -ErrorRecord $_ }
+        return
+    }
 }
 if ($GraphChangeTrackingSPNObjectId -isnot [string]) { $GraphChangeTrackingSPNObjectId = $GraphChangeTrackingSPNObjectId[0] }
 Write-Host "SPN object id for the Microsoft Graph Change Tracking app is '$GraphChangeTrackingSPNObjectId'." -ForegroundColor Green
